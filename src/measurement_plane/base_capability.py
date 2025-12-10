@@ -42,7 +42,7 @@ class BaseCapability:
         """
         raise NotImplementedError("async_execute() must be implemented by subclass")
 
-    async def async_stream(self, parameters):
+    async def async_stream(self, parameters, result_queue):
         """
         Override for streaming measurements
         Must be an async generator:

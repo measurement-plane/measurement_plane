@@ -17,7 +17,6 @@ class NATSClient:
     async def connect(self):
         if not self.nc.is_connected:
             await self.nc.connect(servers=self.servers,
-                                  reconnect =True,
                                   max_reconnect_attempts = -1,
                                   reconnect_time_wait = 2)
             logger.info(f"Connected to NATS servers: {self.servers}")
@@ -34,12 +33,12 @@ class NATSClient:
     # ---------------------------
     async def publish(self, subject: str, message: str):
         if not self.nc.is_connected:
-            await self.connect()
+            raise RuntimeError("NATS is not connected. Call connect() first.")
         await self.nc.publish(subject, message.encode())
 
     async def subscribe(self, subject: str, callback):
         if not self.nc.is_connected:
-            await self.connect()
+            raise RuntimeError("NATS is not connected. Call connect() first.")
 
         async def handler(msg):
             data = msg.data.decode()
@@ -60,7 +59,7 @@ class NATSClient:
 
     async def request(self, subject: str, message: str, timeout=1):
         if not self.nc.is_connected:
-            await self.connect()
+            raise RuntimeError("NATS is not connected. Call connect() first.")
         try:
             msg = await self.nc.request(subject, message.encode(), timeout=timeout)
             return msg.data.decode()
@@ -77,7 +76,7 @@ class NATSClient:
         """
 
         if not self.nc.is_connected:
-            await self.connect()
+            raise RuntimeError("NATS is not connected. Call connect() first.")
 
         reply_subject = f"_INBOX.{uuid.uuid4().hex}"
         
@@ -87,7 +86,7 @@ class NATSClient:
         async def handler(subject, reply, data):
             if not future.done():
                 future.set_result((subject, data))
-                await receipt_receiver_on_message_callback(subject, data)
+                await receipt_receiver_on_message_callback(subject, reply, data)
 
         sid = await self.subscribe(reply_subject, handler)
 
@@ -121,7 +120,7 @@ class NATSClient:
     async def stream_publish(self, stream: str, subject: str, data: bytes):
         """Publish large binary/JSON streaming content (no manual chunking)"""
         if not self.nc.is_connected:
-            await self.connect()
+            raise RuntimeError("NATS is not connected. Call connect() first.")
 
         await self.ensure_stream(stream, subject)
         await self.js.publish(subject, data)
@@ -129,7 +128,7 @@ class NATSClient:
     async def stream_subscribe(self, stream: str, subject: str, callback):
         """Subscribe to JetStream stream with backpressure"""
         if not self.nc.is_connected:
-            await self.connect()
+            raise RuntimeError("NATS is not connected. Call connect() first.")
 
         await self.ensure_stream(stream, subject)
 

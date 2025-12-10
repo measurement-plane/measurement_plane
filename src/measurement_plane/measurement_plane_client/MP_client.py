@@ -17,7 +17,9 @@ class MeasurementPlaneClient:
         await self.broker_client.connect()
         self.capabilityRegister = capabilityRegister(broker_client=self.broker_client)
         await self.capabilityRegister.start()
-
+    
+    async def close(self):
+        await self.broker_client.close()
 
     def get_capabilities(self, capability_types=None):
         caps = self.capabilityRegister.capability_manager.capabilities.copy()
@@ -35,6 +37,7 @@ class MeasurementPlaneClient:
         return Measurement(capability, self)
 
     async def send_measurement(self, measurement: 'Measurement'):
+        print("Sending measurement...")
         if measurement.valid:
             spec_endpoint = measurement.specification_message["endpoint"]
             specification_subject = f'{spec_endpoint}.specifications'
@@ -77,7 +80,6 @@ class Measurement:
                 "stream_results": stream_results,
                 "redirect_to_storage": redirect_to_storage,
                 "result_callback": result_callback,
-                "completion_callback": completion_callback
             }
             self.valid = True
         else:
@@ -92,7 +94,7 @@ class Measurement:
                 measurement_id = Message.calculate_measurement_id(message = receipt_msg)
                 subject = f'{measurement_id}.results'
                 self.result_subscription = await self.measurement_plane_client.broker_client.subscribe(subject=subject,
-                                                                            handler=self._result_handler)
+                                                                            callback=self._result_handler)
 
     async def _result_handler(self, subject, reply, data):
 
@@ -134,15 +136,45 @@ class Measurement:
 
             
     async def interrupt(self):
-        interrupt_msg = self.specification_message
-        interrupt_msg[MessageFields.CAPABILITY] = interrupt_msg[MessageFields.SPECIFICATION]
-        interruption = Measurement(interrupt_msg, self.measurement_plane_client)
-        interruption.valid = True
-        interrupt_msg = interruption.specification_message
-        interrupt_msg[MessageFields.INTERRUPT] = interrupt_msg[MessageFields.SPECIFICATION]
-        del interrupt_msg[MessageFields.SPECIFICATION]
-        interruption.message = interrupt_msg
-        await self.measurement_plane_client.send_measurement(interruption)         
+        try:
+            interrupt_msg = self.specification_message.copy() 
+            
+            # Transform specification -> interrupt
+            interrupt_msg[MessageFields.INTERRUPT] = interrupt_msg[MessageFields.SPECIFICATION]
+            del interrupt_msg[MessageFields.SPECIFICATION]
+            
+            # Send interrupt message
+            spec_endpoint = interrupt_msg["endpoint"]
+            specification_subject = f'{spec_endpoint}.specifications'
+            
+            logging.info(f"Sending interrupt message: {interrupt_msg}")
+            
+            await self.measurement_plane_client.broker_client.send_message_with_reply_to(
+                subject=specification_subject,
+                message=json.dumps(interrupt_msg),
+                receipt_receiver_on_message_callback=self.interrupt_receipt_callback,
+                timeout=5
+            )
+            logging.info("Interrupt sent")
+        except Exception as e:
+            logging.error(f"Error sending interrupt: {e}", exc_info=True)
+    
+    async def interrupt_receipt_callback(self, subject, reply, data):
+        """Handle interrupt receipt"""
+        try:
+            if not data or len(data) == 0:
+                logging.warning("Received empty interrupt receipt")
+                return
+                
+            receipt_msg = json.loads(data)
+            logging.info(f"Interrupt receipt received: {receipt_msg}")
+            
+            if MessageFields.RECEIPT in receipt_msg:
+                logging.info("Interrupt acknowledged by agent")
+        except json.JSONDecodeError as e:
+            logging.error(f"Failed to decode interrupt receipt: {e}, data: {data}")
+        except Exception as e:
+            logging.error(f"Error in interrupt receipt callback: {e}", exc_info=True)
 
     def validate_parameters(self, parameters: dict) -> bool:
         try:

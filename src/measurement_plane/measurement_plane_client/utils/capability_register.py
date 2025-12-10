@@ -68,7 +68,7 @@ class capabilityRegister():
         subject = Subjects.CAPABILITIES_SUBJECT
         await self.broker_client.subscribe(subject, self.receiver_capabilities_on_message_callback)
 
-    def receiver_capabilities_on_message_callback(self, subject, reply, data):
+    async def receiver_capabilities_on_message_callback(self, subject, reply, data):
         try:
             message = json.loads(data)
             capability_id = Message.calculate_capability_id(message=message)

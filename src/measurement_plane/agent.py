@@ -7,13 +7,14 @@ from measurement_plane.base_capability import BaseCapability
 from measurement_plane.messaging.message_format import Subjects, MessageFields, Ids, TaskSchedule
 from measurement_plane.protocols.NATS.nats_client import NATSClient
 class Agent:
-    def __init__(self, broker_url : str, endpoint : str):
-        self.broker_url = broker_url
+    def __init__(self, broker : str, endpoint : str):
+        self.broker_url = broker
         self.endpoint = endpoint
         self.capabilities = []
         self.running = False
         self.broker_client = NATSClient(servers=[self.broker_url])
         self.running_measurements = {}
+        self.measurements_queues = {}
     
     async def connect(self):
         await self.broker_client.connect()
@@ -36,9 +37,11 @@ class Agent:
             for capability in self.capabilities:
                 message = capability.construct_capability()
                 await self.broker_client.publish(subject, json.dumps(message))
+                logging.info(f"Advertised capability")
             await asyncio.sleep(10)
 
     async def start_async(self):
+        await self.connect() 
         self.load_capabilities()
         if not self.capabilities:
             self.running = False
@@ -64,6 +67,8 @@ class Agent:
         
     async def handle_messages(self, subject, reply, data):
         specification_msg = json.loads(data)
+        logging.info("Received specification message", specification_msg)
+        
         capability_id = Ids.calculate_capability_id(specification_msg)
         capability = None
         for cap in self.capabilities:
@@ -78,11 +83,13 @@ class Agent:
                 measurement_id = Ids.calculate_measurement_id(specification_msg)
                 operation_id = Ids.calculate_operation_id(specification_msg)
                 if measurement_id not in self.running_measurements:
+                    self.measurements_queues[measurement_id] = asyncio.Queue()
                     self.running_measurements[measurement_id] = {
-                            'operation_ids': []
+                            'operation_ids': [],
+                            'queue': self.measurements_queues[measurement_id]
                         }
                     self.running_measurements[measurement_id]['operation_ids'].append(operation_id)
-                    task = asyncio.create_task(self.process_specification_async(specification_msg, capability))
+                    task = asyncio.create_task(self.process_specification_async(specification_msg, capability, measurement_id))
                     self.running_measurements[measurement_id]['task'] = task
 
                 if operation_id not in self.running_measurements[measurement_id]['operation_ids']:
@@ -112,17 +119,18 @@ class Agent:
         
 
     async def send_receipt(self, reply, receipt_msg):
-        if MessageFields.SPECIFICATION in receipt_msg:
-            receipt_msg[MessageFields.RECEIPT] = receipt_msg[MessageFields.SPECIFICATION]
-            del receipt_msg[MessageFields.SPECIFICATION]
-        elif MessageFields.INTERRUPT in receipt_msg:
-            receipt_msg[MessageFields.RECEIPT] = receipt_msg[MessageFields.INTERRUPT]
+        receipt_copy = receipt_msg.copy()
+        if MessageFields.SPECIFICATION in receipt_copy:
+            receipt_copy[MessageFields.RECEIPT] = receipt_copy[MessageFields.SPECIFICATION]
+            del receipt_copy[MessageFields.SPECIFICATION]
+        elif MessageFields.INTERRUPT in receipt_copy:
+            receipt_copy[MessageFields.RECEIPT] = receipt_copy[MessageFields.INTERRUPT]
         else:
-            logging.warning("Recipt not supported for msg: {}".format(receipt_msg))
-        receipt_msg[MessageFields.TIMESTAMP] = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-4]        
-        await self.broker_client.publish(reply, json.dumps(receipt_msg))
+            logging.warning("Recipt not supported for msg: {}".format(receipt_copy))
+        receipt_copy[MessageFields.TIMESTAMP] = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-4]        
+        await self.broker_client.publish(reply, json.dumps(receipt_copy))
 
-    async def process_specification_async(self, specification_msg, capability):
+    async def process_specification_async(self, specification_msg, capability, measurement_id=None):
         try:
             schedule = specification_msg[MessageFields.SCHEDULE]
             task_schedule = TaskSchedule(schedule)
@@ -134,15 +142,28 @@ class Agent:
                 await asyncio.sleep(delay)
 
             # Streaming path
-            if task_schedule.stream == "active":
-                async for results in capability.async_stream(parameters):
-                    if results == MessageFields.EOF_RESULTS:
-                        break
-                    await self.send_result_async(specification_msg, results)
+            if getattr(task_schedule, "stream", False):
+                result_queue = self.measurements_queues[measurement_id]
+                stream_task = await capability.async_stream(parameters, result_queue)
+                self.running_measurements[measurement_id]['stream_task'] = stream_task
+                while True:
+                    try:
+                        results = await asyncio.wait_for(result_queue.get(), timeout=3600)
+                        await self.send_result_async(specification_msg, results)
+                        result_queue.task_done()
+                    except asyncio.TimeoutError:
+                        # Check if stream is still running
+                        if stream_task.done():
+                            break
+                    except asyncio.CancelledError:
+                        raise
+                # Only send EOF if the stream actually ends
                 await self.send_result_async(specification_msg, MessageFields.EOF_RESULTS)
-                measurement_id = Ids.calculate_measurement_id(specification_msg)
+
                 if measurement_id in self.running_measurements:
                     del self.running_measurements[measurement_id]
+                if measurement_id in self.measurements_queues: 
+                    del self.measurements_queues[measurement_id]
                 return
 
             # Single / periodic execution
@@ -157,29 +178,45 @@ class Agent:
                 await asyncio.sleep(task_schedule.periodicity.total_seconds())
 
             await self.send_result_async(specification_msg, MessageFields.EOF_RESULTS)
-            measurement_id = Ids.calculate_measurement_id(specification_msg)
+
             if measurement_id in self.running_measurements:
                 del self.running_measurements[measurement_id]
+            if measurement_id in self.measurements_queues: 
+                del self.measurements_queues[measurement_id]
             return
         
         except asyncio.CancelledError:
-            logging.info("Measurement task cancelled.")
+            logging.info(f"Measurement task cancelled for {measurement_id}")
+            if (measurement_id in self.running_measurements and 
+                'stream_task' in self.running_measurements[measurement_id]):
+                stream_task = self.running_measurements[measurement_id]['stream_task']
+                if stream_task and not stream_task.done():
+                    logging.info(f"Cancelling stream task for measurement {measurement_id}")
+                    stream_task.cancel()
+                    try:
+                        await stream_task
+                    except asyncio.CancelledError:
+                        logging.info(f"Stream task cancelled for measurement {measurement_id}")
+            
             await self.send_result_async(specification_msg, MessageFields.EOF_RESULTS)
-            measurement_id = Ids.calculate_measurement_id(specification_msg)
+            
             if measurement_id in self.running_measurements:
                 del self.running_measurements[measurement_id]
+            if measurement_id in self.measurements_queues:
+                del self.measurements_queues[measurement_id]
             return
 
-
     async def send_result_async(self, specification_msg, results):
-        result_msg = specification_msg.copy()
-        measurement_id = Ids.calculate_measurement_id(result_msg)
-        result_msg[MessageFields.RESULT] = result_msg[MessageFields.SPECIFICATION]
-        result_msg[MessageFields.TIMESTAMP] = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-4]
-        del result_msg[MessageFields.SPECIFICATION]
-        resultValues= []
-        resultValues.append(results)
-        result_msg[MessageFields.RESULT_VALUES] = resultValues
-        result_subject = Subjects.get_results_subject(str(measurement_id))
-        await self.broker_client.publish(result_subject, json.dumps(result_msg))
-        
+        try:
+            result_msg = specification_msg.copy()
+            measurement_id = Ids.calculate_measurement_id(result_msg)
+            result_msg[MessageFields.RESULT] = result_msg[MessageFields.SPECIFICATION]
+            result_msg[MessageFields.TIMESTAMP] = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-4]
+            del result_msg[MessageFields.SPECIFICATION]
+            resultValues= []
+            resultValues.append(results)
+            result_msg[MessageFields.RESULT_VALUES] = resultValues
+            result_subject = Subjects.get_results_subject(str(measurement_id))
+            await self.broker_client.publish(result_subject, json.dumps(result_msg))
+        except Exception as e:
+            logging.error(f"[SEND] Error sending result: {e}", exc_info=True)  
