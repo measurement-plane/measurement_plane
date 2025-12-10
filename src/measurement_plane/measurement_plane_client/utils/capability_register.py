@@ -3,9 +3,8 @@ import threading
 import json
 from measurement_plane.messaging.message import Message
 import logging
-from measurement_plane.protocols.amqp.receive import ReceiverThread
-from measurement_plane.protocols.amqp.send import Sender
-from measurement_plane.messaging.message_format import Topics
+
+from measurement_plane.messaging.message_format import Subjects
 
 CAPABILITY_TIMEOUT = 60
 CLEANUP_INTERVAL = 10
@@ -60,18 +59,18 @@ class CapabilitiesManager:
 
 
 
-class Broker():
-    def __init__(self, broker_url):
-        self.broker_url = broker_url
+class capabilityRegister():
+    def __init__(self, broker_client):
+        self.broker_client = broker_client
         self.capability_manager = CapabilitiesManager(CAPABILITY_TIMEOUT, CLEANUP_INTERVAL)
-        self.sender = Sender()
-    def start(self):
-        self.receiver_capabilities = ReceiverThread(broker_url=self.broker_url, topic=Topics.CAPABILITIES_TOPIC, on_message_callback=self.receiver_capabilities_on_message_callback)
-        self.receiver_capabilities.start()
 
-    def receiver_capabilities_on_message_callback(self, event):
+    async def start(self):
+        subject = Subjects.CAPABILITIES_SUBJECT
+        await self.broker_client.subscribe(subject, self.receiver_capabilities_on_message_callback)
+
+    def receiver_capabilities_on_message_callback(self, subject, reply, data):
         try:
-            message =json.loads(event.message.body)
+            message = json.loads(data)
             capability_id = Message.calculate_capability_id(message=message)
             capability = message
             logging.info(f"recived capability: {capability}")

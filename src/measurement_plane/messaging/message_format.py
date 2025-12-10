@@ -1,15 +1,15 @@
 import hashlib
 
-class Topics:
-    CAPABILITIES_TOPIC = 'topic:///capabilities'
+class Subjects:
+    CAPABILITIES_SUBJECT = 'capabilities'
 
     @staticmethod
-    def get_specifications_topic(endpoint: str) -> str:
-        return f'topic://{endpoint}/specifications'
+    def get_specifications_subject(endpoint: str) -> str:
+        return f'{endpoint}.specifications'
     
     @staticmethod
-    def get_results_topic(measurement_id: str) -> str:
-        return f'topic://{measurement_id}/results'
+    def get_results_subject(measurement_id: str) -> str:
+        return f'{measurement_id}.results'
 
 class MessageFields:
     LABEL = 'label'
