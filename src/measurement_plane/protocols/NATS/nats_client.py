@@ -44,18 +44,20 @@ class NATSClient:
             data = msg.data.decode()
             await callback(msg.subject, msg.reply, data)
 
-        sid = await self.nc.subscribe(subject, cb=handler)
-        self.subscriptions[sid] = subject
-        return sid
+        sub = await self.nc.subscribe(subject, cb=handler)
+        self.subscriptions[id(sub)] = sub
+        return id(sub)
 
-    async def unsubscribe(self, sid):
-        if sid in self.subscriptions:
-            try:
-                await self.nc.unsubscribe(sid)
-            except Exception:
-                pass
-            finally:
-                self.subscriptions.pop(sid, None)
+    async def unsubscribe(self, key):
+        sub = self.subscriptions.pop(key, None)
+        if not sub:
+            logging.warning(f"Unsubscribe: no subscription found for key={key}")
+            return
+
+        try:
+            await sub.unsubscribe()
+        except Exception as e:
+            logging.error(f"Unsubscribe failed for {key}: {e}")
 
     async def request(self, subject: str, message: str, timeout=1):
         if not self.nc.is_connected:
@@ -96,6 +98,7 @@ class NATSClient:
             await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(f"No reply received after {timeout}s.")
+            raise
         finally:
             await self.unsubscribe(sid)
 
@@ -126,9 +129,8 @@ class NATSClient:
         await self.js.publish(subject, data)
 
     async def stream_subscribe(self, stream: str, subject: str, callback):
-        """Subscribe to JetStream stream with backpressure"""
         if not self.nc.is_connected:
-            raise RuntimeError("NATS is not connected. Call connect() first.")
+            raise RuntimeError("NATS is not connected.")
 
         await self.ensure_stream(stream, subject)
 
@@ -137,5 +139,5 @@ class NATSClient:
             await msg.ack()
 
         sub = await self.js.subscribe(subject, cb=handler)
-        self.subscriptions[sub._sid] = subject
-        return sub._sid
+        self.subscriptions[id(sub)] = sub
+        return id(sub)

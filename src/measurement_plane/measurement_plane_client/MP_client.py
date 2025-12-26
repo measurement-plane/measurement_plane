@@ -38,18 +38,27 @@ class MeasurementPlaneClient:
 
     async def send_measurement(self, measurement: 'Measurement'):
         print("Sending measurement...")
-        if measurement.valid:
-            spec_endpoint = measurement.specification_message["endpoint"]
-            specification_subject = f'{spec_endpoint}.specifications'
+        if not measurement.valid:
+            logging.error("Measurement not valid for sending")
+            return
+        spec_endpoint = measurement.specification_message["endpoint"]
+        specification_subject = f'{spec_endpoint}.specifications'
+        measurement_id = Message.calculate_measurement_id(message = measurement.specification_message)
+        subject = f'{measurement_id}.results'
+        measurement.result_subscription = await self.broker_client.subscribe(subject=subject,
+                                                                    callback=measurement._result_handler)
+        try:
             await self.broker_client.send_message_with_reply_to(
                 subject=specification_subject,
                 message=json.dumps(measurement.specification_message),
                 receipt_receiver_on_message_callback=measurement.receipt_receiver_on_message_callback,
-                timeout=5)
+                timeout=5
+            )
             logging.info("Measurement sent")
-        else:
-            logging.error("Measurement not valid for sending")
-            pass
+        except asyncio.TimeoutError:
+            logging.error("Specification receipt timeout — stopping measurement.")
+            await measurement.stop()
+        
 
     async def interrupt_measurement(self, measurement: 'Measurement'):
         await measurement.interrupt()
@@ -90,12 +99,7 @@ class Measurement:
         receipt_msg = json.loads(data)
         if MessageFields.RECEIPT in receipt_msg:
             if  MessageFields.INTERRUPT in receipt_msg:
-                logging.info("Measurement interrupted.")
-            else:                  
-                measurement_id = Message.calculate_measurement_id(message = receipt_msg)
-                subject = f'{measurement_id}.results'
-                self.result_subscription = await self.measurement_plane_client.broker_client.subscribe(subject=subject,
-                                                                            callback=self._result_handler)
+                logging.info("Measurement interrupted.")                
 
     async def _result_handler(self, subject, reply, data):
 
@@ -124,8 +128,9 @@ class Measurement:
             results = result_msg[MessageFields.RESULT_VALUES]
             if MessageFields.EOF_RESULTS in results:
                 logging.info("End of results received.")
-                asyncio.create_task(self.stop())
+                await self.stop()
                 return
+            logging.info(f"Results from {subject}")
             self.config['result_callback'](results)
 
     async def stop(self):
