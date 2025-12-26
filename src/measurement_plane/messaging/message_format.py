@@ -19,6 +19,7 @@ class MessageFields:
     PARAMETERS = 'parameters'
     PARAMETERS_SCHEMA = 'parameters_schema'
     RESULT_SCHEMA = 'resultSchema'
+    PLOT_SCHEMA = 'plotSchema'
     TIMESTAMP = 'timestamp'
     NONCE = 'nonce'
     METADATA = 'metadata'

@@ -1,4 +1,4 @@
-Metadata-Version: 2.1
+Metadata-Version: 2.4
 Name: measurement_plane
 Version: 0.2.1
 Summary: Modular Measurement Plane for distributed experiments
@@ -8,6 +8,11 @@ Requires-Dist: python-dateutil>=2.8.0
 Requires-Dist: jsonschema>=4.0.0
 Requires-Dist: numpy>=1.21.0
 Requires-Dist: nats-py
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
 
 # Measurement Plane
 

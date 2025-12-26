@@ -51,8 +51,8 @@ class MeasurementPlaneClient:
             logging.error("Measurement not valid for sending")
             pass
 
-    def interrupt_measurement(self, measurement: 'Measurement'):
-        measurement.interrupt()
+    async def interrupt_measurement(self, measurement: 'Measurement'):
+        await measurement.interrupt()
 
 class Measurement:
     def __init__(self, capability: dict, measurement_plane_client: MeasurementPlaneClient):
@@ -66,10 +66,11 @@ class Measurement:
         self.specification_message[MessageFields.SPECIFICATION] = self.specification_message.pop(MessageFields.CAPABILITY)
         self.valid = False
 
-    def configure(self, schedule: dict, parameters: dict, result_callback, stream_results: bool = False, redirect_to_storage: bool = False, completion_callback = None) -> bool:
+    def configure(self, schedule: str, parameters: dict, result_callback, stream_results: bool = False, redirect_to_storage: bool = False, completion_callback = None) -> bool:
         if self.validate_parameters(parameters):
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-4]
             nonce = uuid.uuid4().hex
+            if stream_results: schedule += "| stream"
             self.specification_message.update({
                 MessageFields.PARAMETERS: parameters,
                 MessageFields.SCHEDULE: schedule,
@@ -108,14 +109,12 @@ class Measurement:
             # If it's bytes, assume it's pickled binary data
             try:
                 result_msg = pickle.loads(data)
-                logging.info("Successfully received and deserialized the message using pickle.")
             except pickle.UnpicklingError as e:
                 logging.error(f"Failed to deserialize message with pickle: {e}")
                 result_msg = None
         else:
             try:
                 result_msg = json.loads(data)
-                logging.info("Successfully received and decoded the message using JSON.")
             except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as e:
                 logging.error(f"Failed to decode message as JSON: {e}")
                 result_msg = None    

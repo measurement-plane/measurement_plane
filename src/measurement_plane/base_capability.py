@@ -13,7 +13,7 @@ class BaseCapability:
         self.label = None
         self.parameters_schema = None
         self.result_schema = None
-        self.nonce = None
+        self.plot_schema = None
         self.metadata = None
         self.type = None
 
@@ -29,6 +29,7 @@ class BaseCapability:
             capability_name=self.name,
             parameters_schema=self.parameters_schema,
             result_schema=self.result_schema,
+            plot_schema=self.plot_schema,
             metadata=None,
             type=self.type
         )

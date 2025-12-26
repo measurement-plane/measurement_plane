@@ -73,7 +73,6 @@ class capabilityRegister():
             message = json.loads(data)
             capability_id = Message.calculate_capability_id(message=message)
             capability = message
-            logging.info(f"recived capability: {capability}")
             self.capability_manager.add_capability(capability_id, capability)
         except Exception as e:
             logging.error(f"Error processing message: {e}")

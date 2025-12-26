@@ -168,7 +168,8 @@ class Agent:
 
             # Single / periodic execution
             while True:
-                results = await capability.async_execute(parameters)
+                print("Executing measurement... Once or periodically")
+                results = await capability.async_task(parameters)
                 if results:
                     await self.send_result_async(specification_msg, results)
 
