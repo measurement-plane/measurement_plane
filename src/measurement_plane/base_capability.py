@@ -1,6 +1,5 @@
 from measurement_plane.messaging.message import CapabilityMessage
-from measurement_plane.messaging.message_format import MessageFields
-import queue
+import queue, asyncio
 
 class BaseCapability:
     """
@@ -14,7 +13,7 @@ class BaseCapability:
         self.label = None
         self.parameters_schema = None
         self.result_schema = None
-        self.nonce = None
+        self.plot_schema = None
         self.metadata = None
         self.type = None
 
@@ -30,23 +29,46 @@ class BaseCapability:
             capability_name=self.name,
             parameters_schema=self.parameters_schema,
             result_schema=self.result_schema,
-            nonce=self.nonce,
+            plot_schema=self.plot_schema,
             metadata=None,
             type=self.type
         )
         self.message = capability.message
-        return capability.message  # construct capability message
+        return capability.message
     
-    def send_result(self, operation_id, result_values):
-        raise NotImplementedError("This method should be overridden by subclasses")
-    
-    def execute_task(self, parameters):
-        raise NotImplementedError("This method should be overridden by subclasses")
-    
-    def stream(self, parameters)-> queue.Queue:
-        raise NotImplementedError("This method should be overridden by subclasses")
-    
-    def stop_stream(self)-> queue.Queue:
-        raise NotImplementedError("This method should be overridden by subclasses")
+    async def async_execute(self, parameters):
+        """
+        Override for one-time or periodic measurement
+        Return a single result dictionary or None
+        """
+        raise NotImplementedError("async_execute() must be implemented by subclass")
 
-    
+    async def async_stream(self, parameters, result_queue):
+        """
+        Override for streaming measurements
+        Must be an async generator:
+            async for result in self.async_stream(parameters):
+                ...
+        """
+        raise NotImplementedError("async_stream() must be implemented by subclass")
+
+    async def stop_stream(self):
+        """
+        Optional override to stop streaming cleanly
+        Called only if streaming is active
+        """
+        pass
+
+# # Important: How subclasses must implement
+# # - async_execute for one-time or periodic measurements
+# async def async_execute(self, parameters):
+#     value = read_sensor()
+#     return {"value": value}
+# # - async_stream for streaming measurements
+# async def async_stream(self, parameters):
+#     while True:
+#         await asyncio.sleep(1)
+#         yield {"count": get_photon_count()}
+# # - stop_stream to clean up streaming resources
+# async def stop_stream(self):
+#     self._streaming = False

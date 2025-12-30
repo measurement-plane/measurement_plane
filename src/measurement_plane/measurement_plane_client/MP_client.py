@@ -1,31 +1,31 @@
-import random
-import string
-import json, pickle
+import json, pickle, uuid
 import logging
 from datetime import datetime
-from threading import Thread, Event
 from jsonschema import validate, exceptions as jsonschema_exceptions
-from measurement_plane.protocols.amqp.receive import ReceiverThread
-from measurement_plane.protocols.amqp.send import Sender
+from measurement_plane.protocols.NATS.nats_client import NATSClient
 from measurement_plane.messaging.message import Message
-from measurement_plane.measurement_plane_client.utils.broker import Broker
-import time
+from measurement_plane.measurement_plane_client.utils.capability_register import capabilityRegister
+import asyncio
 from measurement_plane.messaging.message_format import MessageFields
 class MeasurementPlaneClient:
     def __init__(self, broker_url) -> None:
         self.broker_url = broker_url
-        self.sender = Sender()
-        self.broker = Broker(self.broker_url)
-        self.broker.start()
+        self.broker_client = NATSClient(servers=[broker_url])
+        self.capabilityRegister = None
+    
+    async def connect(self):
+        await self.broker_client.connect()
+        self.capabilityRegister = capabilityRegister(broker_client=self.broker_client)
+        await self.capabilityRegister.start()
+    
+    async def close(self):
+        await self.broker_client.close()
 
-
-    def get_capabilities(self, capability_types: list = None) -> dict:
-        capabilities = self.broker.capability_manager.capabilities
+    def get_capabilities(self, capability_types=None):
+        caps = self.capabilityRegister.capability_manager.capabilities.copy()
         if capability_types:
-            keys_to_delete = [cp_id for cp_id in capabilities if capabilities[cp_id][MessageFields.CAPABILITY] not in capability_types]
-            for cp_id in keys_to_delete:
-                del capabilities[cp_id]
-        return capabilities
+            return {k: v for k, v in caps.items() if v[MessageFields.CAPABILITY] in capability_types}
+        return caps
 
     def combine_to_string(self, attributes: list) -> str:
         return ''.join(str(att).replace(" ", "").replace("\n", "") for att in attributes)
@@ -36,149 +36,149 @@ class MeasurementPlaneClient:
     def create_measurement(self, capability: dict) -> 'Measurement':
         return Measurement(capability, self)
 
-    def send_measurement(self, measurement: 'Measurement'):
-        if measurement.valid:
-            spec_endpoint = measurement.specification_message["endpoint"]
-            specification_topic = f'topic://{spec_endpoint}/specifications'
-            reply_to_topic = 'topic://' + ''.join(random.choices(string.ascii_letters + string.digits, k=10))
-
-            measurement.receipt_receiver = ReceiverThread(broker_url=self.broker_url, topic = reply_to_topic, on_message_callback=measurement.receipt_receiver_on_message_callback)
-            measurement.receipt_receiver.start()
-
-            self.sender.send(self.broker_url, specification_topic, measurement.specification_message, reply_to_topic)
-
-            measurement.receipt_receiver.thread.join(timeout=5)
-            measurement.receipt_receiver.stop()
-            logging.info("Measurement sent")
-        else:
+    async def send_measurement(self, measurement: 'Measurement'):
+        print("Sending measurement...")
+        if not measurement.valid:
             logging.error("Measurement not valid for sending")
-            pass
+            return
+        spec_endpoint = measurement.specification_message["endpoint"]
+        specification_subject = f'{spec_endpoint}.specifications'
+        measurement_id = Message.calculate_measurement_id(message = measurement.specification_message)
+        subject = f'{measurement_id}.results'
+        measurement.result_subscription = await self.broker_client.subscribe(subject=subject,
+                                                                    callback=measurement._result_handler)
+        try:
+            await self.broker_client.send_message_with_reply_to(
+                subject=specification_subject,
+                message=json.dumps(measurement.specification_message),
+                receipt_receiver_on_message_callback=measurement.receipt_receiver_on_message_callback,
+                timeout=5
+            )
+            logging.info("Measurement sent")
+        except asyncio.TimeoutError:
+            logging.error("Specification receipt timeout — stopping measurement.")
+            await measurement.stop()
+        
 
-    def interrupt_measurement(self, measurement: 'Measurement'):
-        measurement.interrupt()
+    async def interrupt_measurement(self, measurement: 'Measurement'):
+        await measurement.interrupt()
 
 class Measurement:
     def __init__(self, capability: dict, measurement_plane_client: MeasurementPlaneClient):
         self.measurement_plane_client = measurement_plane_client
         self.broker_url = self.measurement_plane_client.broker_url
         self.capability = capability
-        self.results_receiver = None
-        self.receipt_receiver = None
         self.results = []
         self.config = {}
+        self.result_subscription = None
         self.specification_message = capability.copy()
         self.specification_message[MessageFields.SPECIFICATION] = self.specification_message.pop(MessageFields.CAPABILITY)
         self.valid = False
 
-    def configure(self, schedule: dict, parameters: dict, result_callback, stream_results: bool = False, redirect_to_storage: bool = False, completion_callback = None) -> bool:
+    def configure(self, schedule: str, parameters: dict, result_callback, stream_results: bool = False, redirect_to_storage: bool = False, completion_callback = None) -> bool:
         if self.validate_parameters(parameters):
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-4]
+            nonce = uuid.uuid4().hex
+            if stream_results: schedule += "| stream"
             self.specification_message.update({
                 MessageFields.PARAMETERS: parameters,
                 MessageFields.SCHEDULE: schedule,
-                MessageFields.TIMESTAMP: timestamp
+                MessageFields.TIMESTAMP: timestamp,
+                MessageFields.NONCE: nonce
             })
             self.config = {
                 "stream_results": stream_results,
                 "redirect_to_storage": redirect_to_storage,
                 "result_callback": result_callback,
-                "completion_callback": completion_callback
             }
             self.valid = True
         else:
             self.valid= False
 
-    def receipt_receiver_on_message_callback(self, event):
-        receipt_msg = json.loads(event.message.body)
+    async def receipt_receiver_on_message_callback(self, subject, reply, data):
+        receipt_msg = json.loads(data)
         if MessageFields.RECEIPT in receipt_msg:
-            event.container.stop()
             if  MessageFields.INTERRUPT in receipt_msg:
-                logging.info("Measurement interrupted.")
-            else:
-                if receipt_msg[MessageFields.RECEIPT] == 'store':
-                    pass
-                elif self.results_receiver is None:
-                    if self.config['redirect_to_storage']:
-                        store_capabilities = self.measurement_plane_client.get_capabilities(["store"])
-                        store_capability = None
-                        for sc in store_capabilities:
-                            store_capability = store_capabilities[sc]
-                        if store_capability:
-                            storage_measurement = self.measurement_plane_client.create_measurement(store_capability)
-                            label = self.specification_message[MessageFields.ENDPOINT]
-                            measurement_id = Message.calculate_measurement_id(message = receipt_msg)
-                            topic = f'topic://{measurement_id}/results'
-                            command = "start"
-                            parameters = {
-                                "label": label,
-                                "topic": topic,
-                                "command": command
-                            }
-                            schedule =self.specification_message[MessageFields.SCHEDULE]
-                            if "|stream" in schedule:
-                                schedule = schedule.replace("|stream", "")
-                            storage_measurement.configure(
-                                schedule=schedule,
-                                parameters=parameters,
-                                result_callback=None,  # Callback function for new results
-                            )
-                            self.measurement_plane_client.send_measurement(storage_measurement)                    
-                    measurement_id = Message.calculate_measurement_id(message = receipt_msg)
-                    topic = f'topic://{measurement_id}/results'
-                    #topic = f'topic:///test/results'
-                    self.results_receiver = ReceiverThread(broker_url=self.broker_url, topic = topic, on_message_callback=self.result_receiver_on_message_callback)
-                    self.results_receiver.start()
+                logging.info("Measurement interrupted.")                
 
-    def result_receiver_on_message_callback(self, event):
-        message_body = event.message.body
+    async def _result_handler(self, subject, reply, data):
 
         # Convert memoryview to bytes if necessary
-        if isinstance(message_body, memoryview):
-            message_body = message_body.tobytes()
+        if isinstance(data, memoryview):
+            data = data.tobytes()
 
         # Try to decode as JSON or fall back to pickle
         result_msg = None
-        if isinstance(message_body, bytes):
+        if isinstance(data, bytes):
             # If it's bytes, assume it's pickled binary data
             try:
-                result_msg = pickle.loads(message_body)
-                logging.info("Successfully received and deserialized the message using pickle.")
+                result_msg = pickle.loads(data)
             except pickle.UnpicklingError as e:
                 logging.error(f"Failed to deserialize message with pickle: {e}")
                 result_msg = None
         else:
             try:
-                result_msg = json.loads(message_body)
-                logging.info("Successfully received and decoded the message using JSON.")
+                result_msg = json.loads(data)
             except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as e:
                 logging.error(f"Failed to decode message as JSON: {e}")
-                result_msg = None
+                result_msg = None    
 
         # Proceed if decoding was successful
-        if result_msg and 'result' in result_msg:
-            results = result_msg['resultValues']
-            if 'EOF_results' in results:
-                print("EOF received will stop")
-                self.stop()
+        if result_msg and MessageFields.RESULT in result_msg:
+            results = result_msg[MessageFields.RESULT_VALUES]
+            if MessageFields.EOF_RESULTS in results:
+                logging.info("End of results received.")
+                await self.stop()
                 return
+            logging.info(f"Results from {subject}")
             self.config['result_callback'](results)
+
+    async def stop(self):
+        if self.result_subscription:
+            await self.measurement_plane_client.broker_client.unsubscribe(self.result_subscription)
+            self.result_subscription = None
+
             
-    def interrupt(self):
-        interrupt_msg = self.specification_message
-        interrupt_msg[MessageFields.CAPABILITY] = interrupt_msg[MessageFields.SPECIFICATION]
-        interruption = Measurement(interrupt_msg, self.measurement_plane_client)
-        interruption.valid = True
-        interrupt_msg = interruption.specification_message
-        interrupt_msg[MessageFields.INTERRUPT] = interrupt_msg[MessageFields.SPECIFICATION]
-        del interrupt_msg[MessageFields.SPECIFICATION]
-        interruption.message = interrupt_msg
-        self.measurement_plane_client.send_measurement(interruption)
-        self.stop()
-        
-    def stop(self):
-        print("will close the receiver")
-        self.results_receiver.stop()
+    async def interrupt(self):
+        try:
+            interrupt_msg = self.specification_message.copy() 
             
+            # Transform specification -> interrupt
+            interrupt_msg[MessageFields.INTERRUPT] = interrupt_msg[MessageFields.SPECIFICATION]
+            del interrupt_msg[MessageFields.SPECIFICATION]
+            
+            # Send interrupt message
+            spec_endpoint = interrupt_msg["endpoint"]
+            specification_subject = f'{spec_endpoint}.specifications'
+            
+            logging.info(f"Sending interrupt message: {interrupt_msg}")
+            
+            await self.measurement_plane_client.broker_client.send_message_with_reply_to(
+                subject=specification_subject,
+                message=json.dumps(interrupt_msg),
+                receipt_receiver_on_message_callback=self.interrupt_receipt_callback,
+                timeout=5
+            )
+            logging.info("Interrupt sent")
+        except Exception as e:
+            logging.error(f"Error sending interrupt: {e}", exc_info=True)
+    
+    async def interrupt_receipt_callback(self, subject, reply, data):
+        """Handle interrupt receipt"""
+        try:
+            if not data or len(data) == 0:
+                logging.warning("Received empty interrupt receipt")
+                return
+                
+            receipt_msg = json.loads(data)
+            logging.info(f"Interrupt receipt received: {receipt_msg}")
+            
+            if MessageFields.RECEIPT in receipt_msg:
+                logging.info("Interrupt acknowledged by agent")
+        except json.JSONDecodeError as e:
+            logging.error(f"Failed to decode interrupt receipt: {e}, data: {data}")
+        except Exception as e:
+            logging.error(f"Error in interrupt receipt callback: {e}", exc_info=True)
 
     def validate_parameters(self, parameters: dict) -> bool:
         try:

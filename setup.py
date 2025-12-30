@@ -1,16 +1,15 @@
 from setuptools import setup, find_packages
 
-
 setup(
     name="measurement_plane",
-    version="0.1",
-    packages=find_packages(where="src"),
+    version="0.2.1",
     package_dir={"": "src"},
+    packages=find_packages(where="src"),
     install_requires=[
-        "python-qpid-proton==0.39.0",  # Required for AMQP
-        "python-dateutil>=2.8.0",      # For date manipulation
-        "jsonschema>=4.0.0",           # For JSON validation
-        "numpy>=1.21.0",               # For numerical processing
+        "python-dateutil>=2.8.0",
+        "jsonschema>=4.0.0",
+        "numpy>=1.21.0",
+        "nats-py",   
     ],
     entry_points={
         'console_scripts': [
@@ -18,8 +17,8 @@ setup(
         ],
     },
     include_package_data=True,
-    description="A description of your project.",
-    long_description="This is a long description of the measurement_plane project.",
+    description="Modular Measurement Plane for distributed experiments",
+    long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
-    python_requires='>=3.6',
+    python_requires='>=3.8',
 )
