@@ -1,4 +1,3 @@
-README.md
 setup.py
 src/measurement_plane/__init__.py
 src/measurement_plane/agent.py
@@ -9,14 +8,12 @@ src/measurement_plane.egg-info/dependency_links.txt
 src/measurement_plane.egg-info/entry_points.txt
 src/measurement_plane.egg-info/requires.txt
 src/measurement_plane.egg-info/top_level.txt
-src/measurement_plane/measurement_plane_client/__init__.py
-src/measurement_plane/measurement_plane_client/mp_client.py
-src/measurement_plane/measurement_plane_client/utils/__init__.py
-src/measurement_plane/measurement_plane_client/utils/capability_register.py
-src/measurement_plane/measurement_plane_client/utils/config.py
 src/measurement_plane/messaging/__init__.py
 src/measurement_plane/messaging/message.py
 src/measurement_plane/messaging/message_format.py
 src/measurement_plane/protocols/__init__.py
+src/measurement_plane/protocols/amqp/__init__.py
+src/measurement_plane/protocols/amqp/receive.py
+src/measurement_plane/protocols/amqp/send.py
 src/measurement_plane/utils/__init__.py
 src/measurement_plane/utils/decorators.py
