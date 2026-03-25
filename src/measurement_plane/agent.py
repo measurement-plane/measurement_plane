@@ -69,10 +69,9 @@ class Agent:
         specification_msg = json.loads(data)
         logging.info("Received specification message", specification_msg)
         
-        capability_id = Ids.calculate_capability_id(specification_msg)
         capability = None
         for cap in self.capabilities:
-            if capability_id == Ids.calculate_capability_id(cap.construct_capability()):
+            if cap.matches_specification(specification_msg):
                 capability = cap
                 break
 

@@ -8,6 +8,7 @@ class BaseCapability:
 
     def __init__(self, name:str):
         self.name = name
+        self.aliases = []
         self.agent = None
         self.endpoint = None
         self.label = None
@@ -22,6 +23,9 @@ class BaseCapability:
         self.endpoint = agent.endpoint
 
     def construct_capability(self):
+        metadata = dict(self.metadata or {})
+        if self.aliases:
+            metadata["aliases"] = list(self.aliases)
         capability = CapabilityMessage()
         capability.construct(
             label=self.label,
@@ -30,11 +34,20 @@ class BaseCapability:
             parameters_schema=self.parameters_schema,
             result_schema=self.result_schema,
             plot_schema=self.plot_schema,
-            metadata=None,
+            metadata=metadata or None,
             type=self.type
         )
         self.message = capability.message
         return capability.message
+
+    def matches_specification(self, specification_msg):
+        endpoint = specification_msg.get("endpoint")
+        capability_name = specification_msg.get("capabilityName")
+        if endpoint != self.endpoint:
+            return False
+
+        accepted_names = {self.name, *self.aliases}
+        return capability_name in accepted_names
     
     async def async_execute(self, parameters):
         """
