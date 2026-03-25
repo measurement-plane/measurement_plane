@@ -11,12 +11,12 @@ class Receiver():
         self.on_message_callback = on_message_callback
 
     def receive_event(self, server, topic):
-        handler = self.event_Receiver_handller(server, topic, self.on_message_callback)
+        handler = self.EventReceiverHandler(server, topic, self.on_message_callback)
         Container(handler).run()
 
-    class event_Receiver_handller(MessagingHandler):
+    class EventReceiverHandler(MessagingHandler):
         def __init__(self, server, topic, on_message_callback=None):
-            super(Receiver.event_Receiver_handller, self).__init__()
+            super(Receiver.EventReceiverHandler, self).__init__()
             self.server = server
             self.topic = topic
             self.on_message_callback = on_message_callback
@@ -34,3 +34,6 @@ class Receiver():
 
             except Exception:
                 traceback.print_exc()
+
+    # Compatibility alias for older references.
+    event_Receiver_handller = EventReceiverHandler

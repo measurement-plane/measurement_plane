@@ -59,7 +59,7 @@ class CapabilitiesManager:
 
 
 
-class capabilityRegister():
+class CapabilityRegister:
     def __init__(self, broker_client):
         self.broker_client = broker_client
         self.capability_manager = CapabilitiesManager(CAPABILITY_TIMEOUT, CLEANUP_INTERVAL)
@@ -76,6 +76,10 @@ class capabilityRegister():
             self.capability_manager.add_capability(capability_id, capability)
         except Exception as e:
             logging.error(f"Error processing message: {e}")
+
+
+# Compatibility alias for older imports.
+capabilityRegister = CapabilityRegister
     
 
 

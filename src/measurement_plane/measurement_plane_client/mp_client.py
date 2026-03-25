@@ -4,25 +4,27 @@ from datetime import datetime
 from jsonschema import validate, exceptions as jsonschema_exceptions
 from measurement_plane.protocols.NATS.nats_client import NATSClient
 from measurement_plane.messaging.message import Message
-from measurement_plane.measurement_plane_client.utils.capability_register import capabilityRegister
+from measurement_plane.measurement_plane_client.utils.capability_register import CapabilityRegister
 import asyncio
 from measurement_plane.messaging.message_format import MessageFields
 class MeasurementPlaneClient:
     def __init__(self, broker_url) -> None:
         self.broker_url = broker_url
         self.broker_client = NATSClient(servers=[broker_url])
+        self.capability_register = None
         self.capabilityRegister = None
     
     async def connect(self):
         await self.broker_client.connect()
-        self.capabilityRegister = capabilityRegister(broker_client=self.broker_client)
-        await self.capabilityRegister.start()
+        self.capability_register = CapabilityRegister(broker_client=self.broker_client)
+        self.capabilityRegister = self.capability_register
+        await self.capability_register.start()
     
     async def close(self):
         await self.broker_client.close()
 
     def get_capabilities(self, capability_types=None):
-        caps = self.capabilityRegister.capability_manager.capabilities.copy()
+        caps = self.capability_register.capability_manager.capabilities.copy()
         if capability_types:
             return {k: v for k, v in caps.items() if v[MessageFields.CAPABILITY] in capability_types}
         return caps
