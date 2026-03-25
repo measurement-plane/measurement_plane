@@ -30,6 +30,8 @@ class MessageFields:
     RESULT_VALUES = 'resultValues'
     RECEIPT = 'receipt'
     EOF_RESULTS = 'EOF_results'
+    STATUS = 'status'
+    INTERRUPT_CONFIRMED = 'interruptConfirmed'
 
 from datetime import datetime, timedelta
 import re

@@ -96,7 +96,6 @@ class Agent:
                     self.running_measurements[measurement_id]['operation_ids'].append(operation_id)
 
             elif MessageFields.INTERRUPT in specification_msg:
-                await self.send_receipt(reply, specification_msg)
                 measurement_id = Ids.calculate_measurement_id(specification_msg)
                 operation_id = Ids.calculate_operation_id(specification_msg)
                 if measurement_id in self.running_measurements:
@@ -107,10 +106,39 @@ class Agent:
                     if len(self.running_measurements[measurement_id]['operation_ids']) == 0:
                         task = self.running_measurements[measurement_id]['task']
                         task.cancel()
-                        logging.info(f"Interrupt signal sent for specification")
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                        logging.info(f"Interrupt confirmed for measurement {measurement_id}")
+                        await self.send_receipt(
+                            reply,
+                            specification_msg,
+                            extra_fields={
+                                MessageFields.INTERRUPT_CONFIRMED: True,
+                                MessageFields.STATUS: "interrupted",
+                            },
+                        )
+                    else:
+                        await self.send_receipt(
+                            reply,
+                            specification_msg,
+                            extra_fields={
+                                MessageFields.INTERRUPT_CONFIRMED: False,
+                                MessageFields.STATUS: "measurement_still_running",
+                            },
+                        )
                         
                 else:
                     logging.warning(f"Specification not found.")
+                    await self.send_receipt(
+                        reply,
+                        specification_msg,
+                        extra_fields={
+                            MessageFields.INTERRUPT_CONFIRMED: True,
+                            MessageFields.STATUS: "already_stopped",
+                        },
+                    )
                 
             else:
                 logging.warning("Unknown message type.")
@@ -118,7 +146,7 @@ class Agent:
             logging.info("received unknown capability")
         
 
-    async def send_receipt(self, reply, receipt_msg):
+    async def send_receipt(self, reply, receipt_msg, extra_fields=None):
         receipt_copy = receipt_msg.copy()
         if MessageFields.SPECIFICATION in receipt_copy:
             receipt_copy[MessageFields.RECEIPT] = receipt_copy[MessageFields.SPECIFICATION]
@@ -128,6 +156,8 @@ class Agent:
         else:
             logging.warning("Recipt not supported for msg: {}".format(receipt_copy))
         receipt_copy[MessageFields.TIMESTAMP] = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-4]        
+        if extra_fields:
+            receipt_copy.update(extra_fields)
         await self.broker_client.publish(reply, json.dumps(receipt_copy))
 
     async def process_specification_async(self, specification_msg, capability, measurement_id=None):

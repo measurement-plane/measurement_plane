@@ -54,6 +54,7 @@ class MeasurementPlaneClient:
                 receipt_receiver_on_message_callback=measurement.receipt_receiver_on_message_callback,
                 timeout=5
             )
+            measurement.active = True
             logging.info("Measurement sent")
         except asyncio.TimeoutError:
             logging.error("Specification receipt timeout — stopping measurement.")
@@ -61,7 +62,7 @@ class MeasurementPlaneClient:
         
 
     async def interrupt_measurement(self, measurement: 'Measurement'):
-        await measurement.interrupt()
+        return await measurement.interrupt()
 
 class Measurement:
     def __init__(self, capability: dict, measurement_plane_client: MeasurementPlaneClient):
@@ -74,6 +75,9 @@ class Measurement:
         self.specification_message = capability.copy()
         self.specification_message[MessageFields.SPECIFICATION] = self.specification_message.pop(MessageFields.CAPABILITY)
         self.valid = False
+        self.active = False
+        self.stop_confirmed = False
+        self.last_interrupt_status = None
 
     def configure(self, schedule: str, parameters: dict, result_callback, stream_results: bool = False, redirect_to_storage: bool = False, completion_callback = None) -> bool:
         if self.validate_parameters(parameters):
@@ -90,6 +94,7 @@ class Measurement:
                 "stream_results": stream_results,
                 "redirect_to_storage": redirect_to_storage,
                 "result_callback": result_callback,
+                "completion_callback": completion_callback,
             }
             self.valid = True
         else:
@@ -137,10 +142,19 @@ class Measurement:
         if self.result_subscription:
             await self.measurement_plane_client.broker_client.unsubscribe(self.result_subscription)
             self.result_subscription = None
+        self.active = False
+        completion_callback = self.config.get("completion_callback")
+        if completion_callback:
+            try:
+                completion_callback()
+            except Exception as e:
+                logging.error(f"Error in completion callback: {e}", exc_info=True)
 
             
     async def interrupt(self):
         try:
+            self.stop_confirmed = False
+            self.last_interrupt_status = None
             interrupt_msg = self.specification_message.copy() 
             
             # Transform specification -> interrupt
@@ -157,11 +171,17 @@ class Measurement:
                 subject=specification_subject,
                 message=json.dumps(interrupt_msg),
                 receipt_receiver_on_message_callback=self.interrupt_receipt_callback,
-                timeout=5
+                timeout=10
             )
-            logging.info("Interrupt sent")
+            if self.stop_confirmed:
+                await self.stop()
+                logging.info("Interrupt confirmed by agent")
+            else:
+                logging.warning("Interrupt reply received without stop confirmation")
+            return self.stop_confirmed
         except Exception as e:
             logging.error(f"Error sending interrupt: {e}", exc_info=True)
+            return False
     
     async def interrupt_receipt_callback(self, subject, reply, data):
         """Handle interrupt receipt"""
@@ -174,7 +194,13 @@ class Measurement:
             logging.info(f"Interrupt receipt received: {receipt_msg}")
             
             if MessageFields.RECEIPT in receipt_msg:
-                logging.info("Interrupt acknowledged by agent")
+                self.stop_confirmed = bool(receipt_msg.get(MessageFields.INTERRUPT_CONFIRMED, False))
+                self.last_interrupt_status = receipt_msg.get(MessageFields.STATUS)
+                logging.info(
+                    "Interrupt receipt status=%s confirmed=%s",
+                    self.last_interrupt_status,
+                    self.stop_confirmed,
+                )
         except json.JSONDecodeError as e:
             logging.error(f"Failed to decode interrupt receipt: {e}, data: {data}")
         except Exception as e:
