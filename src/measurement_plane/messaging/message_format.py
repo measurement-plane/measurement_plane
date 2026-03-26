@@ -11,6 +11,10 @@ class Subjects:
     def get_results_subject(measurement_id: str) -> str:
         return f'{measurement_id}.results'
 
+    @staticmethod
+    def get_events_subject(measurement_id: str) -> str:
+        return f'{measurement_id}.events'
+
 class MessageFields:
     LABEL = 'label'
     ENDPOINT = 'endpoint'
@@ -32,6 +36,37 @@ class MessageFields:
     EOF_RESULTS = 'EOF_results'
     STATUS = 'status'
     INTERRUPT_CONFIRMED = 'interruptConfirmed'
+    MEASUREMENT_ID = 'measurementId'
+    OPERATION_ID = 'operationId'
+    PLANE = 'plane'
+    CONTROL_PLANE = 'control'
+    DATA_PLANE = 'data'
+    EXECUTION_MODE = 'executionMode'
+    LIFECYCLE_EVENT = 'lifecycleEvent'
+    LIFECYCLE_STATE = 'lifecycleState'
+    EVENT_PAYLOAD = 'eventPayload'
+    SEQUENCE = 'sequence'
+    ERROR = 'error'
+
+
+class ExecutionModes:
+    ONE_SHOT = 'one_shot'
+    FINITE_STREAM = 'finite_stream'
+    INFINITE_STREAM = 'infinite_stream'
+
+
+class LifecycleStates:
+    ACCEPTED = 'accepted'
+    RUNNING = 'running'
+    RETRYING = 'retrying'
+    COMPLETED = 'completed'
+    INTERRUPTED = 'interrupted'
+    FAILED = 'failed'
+
+
+class CapabilityMetadata:
+    DEFAULT_EXECUTION_MODE = 'defaultExecutionMode'
+    SUPPORTED_EXECUTION_MODES = 'supportedExecutionModes'
 
 from datetime import datetime, timedelta
 import re

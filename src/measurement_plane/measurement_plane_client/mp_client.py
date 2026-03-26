@@ -6,7 +6,7 @@ from measurement_plane.protocols.NATS.nats_client import NATSClient
 from measurement_plane.messaging.message import Message
 from measurement_plane.measurement_plane_client.utils.capability_register import CapabilityRegister
 import asyncio
-from measurement_plane.messaging.message_format import MessageFields
+from measurement_plane.messaging.message_format import MessageFields, Subjects, CapabilityMetadata, ExecutionModes
 class MeasurementPlaneClient:
     def __init__(self, broker_url) -> None:
         self.broker_url = broker_url
@@ -46,9 +46,12 @@ class MeasurementPlaneClient:
         spec_endpoint = measurement.specification_message["endpoint"]
         specification_subject = f'{spec_endpoint}.specifications'
         measurement_id = Message.calculate_measurement_id(message = measurement.specification_message)
-        subject = f'{measurement_id}.results'
-        measurement.result_subscription = await self.broker_client.subscribe(subject=subject,
+        measurement.result_subscription = await self.broker_client.subscribe(subject=Subjects.get_results_subject(str(measurement_id)),
                                                                     callback=measurement._result_handler)
+        measurement.event_subscription = await self.broker_client.subscribe(
+            subject=Subjects.get_events_subject(str(measurement_id)),
+            callback=measurement._event_handler,
+        )
         try:
             await self.broker_client.send_message_with_reply_to(
                 subject=specification_subject,
@@ -74,29 +77,40 @@ class Measurement:
         self.results = []
         self.config = {}
         self.result_subscription = None
+        self.event_subscription = None
         self.specification_message = capability.copy()
         self.specification_message[MessageFields.SPECIFICATION] = self.specification_message.pop(MessageFields.CAPABILITY)
         self.valid = False
         self.active = False
         self.stop_confirmed = False
         self.last_interrupt_status = None
+        self.state = None
+        self.lifecycle_events = []
 
-    def configure(self, schedule: str, parameters: dict, result_callback, stream_results: bool = False, redirect_to_storage: bool = False, completion_callback = None) -> bool:
+    def configure(self, schedule: str, parameters: dict, result_callback, stream_results: bool = False, redirect_to_storage: bool = False, completion_callback = None, lifecycle_callback=None, execution_mode=None) -> bool:
         if self.validate_parameters(parameters):
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-4]
             nonce = uuid.uuid4().hex
-            if stream_results: schedule += "| stream"
+            if stream_results:
+                schedule += "| stream"
+            if execution_mode is None:
+                metadata = self.capability.get(MessageFields.METADATA) or {}
+                execution_mode = metadata.get(CapabilityMetadata.DEFAULT_EXECUTION_MODE)
+                if execution_mode is None:
+                    execution_mode = ExecutionModes.INFINITE_STREAM if stream_results else ExecutionModes.ONE_SHOT
             self.specification_message.update({
                 MessageFields.PARAMETERS: parameters,
                 MessageFields.SCHEDULE: schedule,
                 MessageFields.TIMESTAMP: timestamp,
-                MessageFields.NONCE: nonce
+                MessageFields.NONCE: nonce,
+                MessageFields.EXECUTION_MODE: execution_mode,
             })
             self.config = {
                 "stream_results": stream_results,
                 "redirect_to_storage": redirect_to_storage,
                 "result_callback": result_callback,
                 "completion_callback": completion_callback,
+                "lifecycle_callback": lifecycle_callback,
             }
             self.valid = True
         else:
@@ -140,10 +154,38 @@ class Measurement:
             logging.info(f"Results from {subject}")
             self.config['result_callback'](results)
 
+    async def _event_handler(self, subject, reply, data):
+        event_msg = None
+        try:
+            if isinstance(data, memoryview):
+                data = data.tobytes()
+            if isinstance(data, bytes):
+                event_msg = json.loads(data.decode("utf-8"))
+            else:
+                event_msg = json.loads(data)
+        except Exception as e:
+            logging.error(f"Failed to decode lifecycle event: {e}")
+            return
+
+        if not isinstance(event_msg, dict) or MessageFields.LIFECYCLE_EVENT not in event_msg:
+            return
+
+        self.state = event_msg.get(MessageFields.LIFECYCLE_STATE)
+        self.lifecycle_events.append(event_msg)
+        lifecycle_callback = self.config.get("lifecycle_callback")
+        if lifecycle_callback:
+            try:
+                lifecycle_callback(event_msg)
+            except Exception as e:
+                logging.error(f"Error in lifecycle callback: {e}", exc_info=True)
+
     async def stop(self):
         if self.result_subscription:
             await self.measurement_plane_client.broker_client.unsubscribe(self.result_subscription)
             self.result_subscription = None
+        if self.event_subscription:
+            await self.measurement_plane_client.broker_client.unsubscribe(self.event_subscription)
+            self.event_subscription = None
         self.active = False
         completion_callback = self.config.get("completion_callback")
         if completion_callback:

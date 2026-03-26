@@ -4,7 +4,14 @@ import asyncio
 from datetime import datetime
 from measurement_plane.utils.decorators import registered_capabilities
 from measurement_plane.base_capability import BaseCapability
-from measurement_plane.messaging.message_format import Subjects, MessageFields, Ids, TaskSchedule
+from measurement_plane.messaging.message_format import (
+    Subjects,
+    MessageFields,
+    Ids,
+    TaskSchedule,
+    ExecutionModes,
+    LifecycleStates,
+)
 from measurement_plane.protocols.NATS.nats_client import NATSClient
 class Agent:
     def __init__(self, broker : str, endpoint : str):
@@ -85,11 +92,22 @@ class Agent:
                     self.measurements_queues[measurement_id] = asyncio.Queue()
                     self.running_measurements[measurement_id] = {
                             'operation_ids': [],
-                            'queue': self.measurements_queues[measurement_id]
+                            'queue': self.measurements_queues[measurement_id],
+                            'event_sequence': 0,
                         }
                     self.running_measurements[measurement_id]['operation_ids'].append(operation_id)
                     task = asyncio.create_task(self.process_specification_async(specification_msg, capability, measurement_id))
                     self.running_measurements[measurement_id]['task'] = task
+                    await self.send_lifecycle_event(
+                        specification_msg,
+                        measurement_id,
+                        event_name="measurement_accepted",
+                        state=LifecycleStates.ACCEPTED,
+                        payload={
+                            MessageFields.STATUS: "accepted",
+                            MessageFields.EXECUTION_MODE: self._resolve_execution_mode(specification_msg),
+                        },
+                    )
 
                 if operation_id not in self.running_measurements[measurement_id]['operation_ids']:
                     self.running_measurements[measurement_id]['operation_ids'].append(operation_id)
@@ -164,42 +182,71 @@ class Agent:
             schedule = specification_msg[MessageFields.SCHEDULE]
             task_schedule = TaskSchedule(schedule)
             parameters = specification_msg[MessageFields.PARAMETERS]
+            execution_mode = self._resolve_execution_mode(specification_msg, task_schedule)
+            result_queue = self.measurements_queues[measurement_id]
+
+            async def lifecycle_emitter(event_name, state, payload=None):
+                await self.send_lifecycle_event(
+                    specification_msg,
+                    measurement_id,
+                    event_name=event_name,
+                    state=state,
+                    payload=payload or {},
+                )
+
+            capability.bind_lifecycle_emitter(lifecycle_emitter)
 
             # Wait until start time
             delay = (task_schedule.start - datetime.now()).total_seconds()
             if delay > 0:
                 await asyncio.sleep(delay)
 
-            # Streaming path
-            if getattr(task_schedule, "stream", False):
-                result_queue = self.measurements_queues[measurement_id]
+            await self.send_lifecycle_event(
+                specification_msg,
+                measurement_id,
+                event_name="measurement_started",
+                state=LifecycleStates.RUNNING,
+                payload={MessageFields.EXECUTION_MODE: execution_mode},
+            )
+
+            if execution_mode in {ExecutionModes.FINITE_STREAM, ExecutionModes.INFINITE_STREAM}:
                 stream_task = await capability.async_stream(parameters, result_queue)
                 self.running_measurements[measurement_id]['stream_task'] = stream_task
                 while True:
                     try:
+                        if task_schedule.stop and datetime.now() >= task_schedule.stop:
+                            if stream_task and not stream_task.done():
+                                stream_task.cancel()
+                                try:
+                                    await stream_task
+                                except asyncio.CancelledError:
+                                    pass
+                            break
                         results = await asyncio.wait_for(result_queue.get(), timeout=3600)
                         await self.send_result_async(specification_msg, results)
                         result_queue.task_done()
-                        if stream_task.done() and result_queue.empty():
+                        if execution_mode == ExecutionModes.FINITE_STREAM and stream_task.done() and result_queue.empty():
+                            break
+                        if execution_mode == ExecutionModes.INFINITE_STREAM and stream_task.done() and result_queue.empty():
                             break
                     except asyncio.TimeoutError:
-                        # Check if stream is still running
                         if stream_task.done():
                             break
                     except asyncio.CancelledError:
                         raise
-                # Only send EOF if the stream actually ends
                 await self.send_result_async(specification_msg, MessageFields.EOF_RESULTS)
+                await self.send_lifecycle_event(
+                    specification_msg,
+                    measurement_id,
+                    event_name="measurement_completed",
+                    state=LifecycleStates.COMPLETED,
+                    payload={MessageFields.STATUS: "completed"},
+                )
 
-                if measurement_id in self.running_measurements:
-                    del self.running_measurements[measurement_id]
-                if measurement_id in self.measurements_queues: 
-                    del self.measurements_queues[measurement_id]
+                self._clear_measurement(measurement_id)
                 return
 
-            # Single / periodic execution
             while True:
-                print("Executing measurement... Once or periodically")
                 results = await capability.async_task(parameters)
                 if results:
                     await self.send_result_async(specification_msg, results)
@@ -210,11 +257,14 @@ class Agent:
                 await asyncio.sleep(task_schedule.periodicity.total_seconds())
 
             await self.send_result_async(specification_msg, MessageFields.EOF_RESULTS)
-
-            if measurement_id in self.running_measurements:
-                del self.running_measurements[measurement_id]
-            if measurement_id in self.measurements_queues: 
-                del self.measurements_queues[measurement_id]
+            await self.send_lifecycle_event(
+                specification_msg,
+                measurement_id,
+                event_name="measurement_completed",
+                state=LifecycleStates.COMPLETED,
+                payload={MessageFields.STATUS: "completed"},
+            )
+            self._clear_measurement(measurement_id)
             return
         
         except asyncio.CancelledError:
@@ -231,11 +281,29 @@ class Agent:
                         logging.info(f"Stream task cancelled for measurement {measurement_id}")
             
             await self.send_result_async(specification_msg, MessageFields.EOF_RESULTS)
-            
-            if measurement_id in self.running_measurements:
-                del self.running_measurements[measurement_id]
-            if measurement_id in self.measurements_queues:
-                del self.measurements_queues[measurement_id]
+            await self.send_lifecycle_event(
+                specification_msg,
+                measurement_id,
+                event_name="measurement_interrupted",
+                state=LifecycleStates.INTERRUPTED,
+                payload={MessageFields.STATUS: "interrupted"},
+            )
+            self._clear_measurement(measurement_id)
+            return
+        except Exception as e:
+            logging.error(f"Measurement task failed for {measurement_id}: {e}", exc_info=True)
+            await self.send_lifecycle_event(
+                specification_msg,
+                measurement_id,
+                event_name="measurement_failed",
+                state=LifecycleStates.FAILED,
+                payload={
+                    MessageFields.STATUS: "failed",
+                    MessageFields.ERROR: str(e),
+                },
+            )
+            await self.send_result_async(specification_msg, MessageFields.EOF_RESULTS)
+            self._clear_measurement(measurement_id)
             return
 
     async def send_result_async(self, specification_msg, results):
@@ -244,6 +312,8 @@ class Agent:
             measurement_id = Ids.calculate_measurement_id(result_msg)
             result_msg[MessageFields.RESULT] = result_msg[MessageFields.SPECIFICATION]
             result_msg[MessageFields.TIMESTAMP] = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-4]
+            result_msg[MessageFields.MEASUREMENT_ID] = str(measurement_id)
+            result_msg[MessageFields.PLANE] = MessageFields.DATA_PLANE
             del result_msg[MessageFields.SPECIFICATION]
             resultValues= []
             resultValues.append(results)
@@ -252,3 +322,46 @@ class Agent:
             await self.broker_client.publish(result_subject, json.dumps(result_msg))
         except Exception as e:
             logging.error(f"[SEND] Error sending result: {e}", exc_info=True)  
+
+    async def send_lifecycle_event(self, specification_msg, measurement_id, event_name, state, payload=None):
+        try:
+            entry = self.running_measurements.get(measurement_id)
+            sequence = 1
+            if entry is not None:
+                sequence = entry.get("event_sequence", 0) + 1
+                entry["event_sequence"] = sequence
+            event_msg = {
+                MessageFields.MEASUREMENT_ID: str(measurement_id),
+                MessageFields.ENDPOINT: specification_msg.get(MessageFields.ENDPOINT),
+                MessageFields.CAPABILITY_NAME: specification_msg.get(MessageFields.CAPABILITY_NAME),
+                MessageFields.TIMESTAMP: datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-4],
+                MessageFields.PLANE: MessageFields.CONTROL_PLANE,
+                MessageFields.LIFECYCLE_EVENT: event_name,
+                MessageFields.LIFECYCLE_STATE: state,
+                MessageFields.SEQUENCE: sequence,
+                MessageFields.EVENT_PAYLOAD: payload or {},
+                MessageFields.EXECUTION_MODE: self._resolve_execution_mode(specification_msg),
+            }
+            await self.broker_client.publish(
+                Subjects.get_events_subject(str(measurement_id)),
+                json.dumps(event_msg),
+            )
+        except Exception as e:
+            logging.error(f"[EVENT] Error sending lifecycle event: {e}", exc_info=True)
+
+    def _resolve_execution_mode(self, specification_msg, task_schedule=None):
+        explicit = specification_msg.get(MessageFields.EXECUTION_MODE)
+        if explicit:
+            return explicit
+        if task_schedule is None:
+            schedule = specification_msg.get(MessageFields.SCHEDULE, "")
+            task_schedule = TaskSchedule(schedule)
+        if getattr(task_schedule, "stream", False):
+            return ExecutionModes.INFINITE_STREAM
+        return ExecutionModes.ONE_SHOT
+
+    def _clear_measurement(self, measurement_id):
+        if measurement_id in self.running_measurements:
+            del self.running_measurements[measurement_id]
+        if measurement_id in self.measurements_queues:
+            del self.measurements_queues[measurement_id]

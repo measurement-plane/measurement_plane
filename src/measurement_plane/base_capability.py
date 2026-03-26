@@ -1,4 +1,5 @@
 from measurement_plane.messaging.message import CapabilityMessage
+from measurement_plane.messaging.message_format import CapabilityMetadata, ExecutionModes
 import queue, asyncio
 
 class BaseCapability:
@@ -17,6 +18,9 @@ class BaseCapability:
         self.plot_schema = None
         self.metadata = None
         self.type = None
+        self.default_execution_mode = ExecutionModes.ONE_SHOT
+        self.supported_execution_modes = [ExecutionModes.ONE_SHOT]
+        self._lifecycle_emitter = None
 
     def set_agent(self, agent):
         self.agent = agent
@@ -26,6 +30,8 @@ class BaseCapability:
         metadata = dict(self.metadata or {})
         if self.aliases:
             metadata["aliases"] = list(self.aliases)
+        metadata.setdefault(CapabilityMetadata.DEFAULT_EXECUTION_MODE, self.default_execution_mode)
+        metadata.setdefault(CapabilityMetadata.SUPPORTED_EXECUTION_MODES, list(self.supported_execution_modes))
         capability = CapabilityMessage()
         capability.construct(
             label=self.label,
@@ -48,6 +54,14 @@ class BaseCapability:
 
         accepted_names = {self.name, *self.aliases}
         return capability_name in accepted_names
+
+    def bind_lifecycle_emitter(self, emitter):
+        self._lifecycle_emitter = emitter
+
+    async def emit_lifecycle_event(self, event_name: str, state: str, payload=None):
+        if self._lifecycle_emitter is None:
+            return
+        await self._lifecycle_emitter(event_name, state, payload or {})
     
     async def async_execute(self, parameters):
         """
