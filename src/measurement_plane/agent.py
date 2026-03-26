@@ -180,6 +180,8 @@ class Agent:
                         results = await asyncio.wait_for(result_queue.get(), timeout=3600)
                         await self.send_result_async(specification_msg, results)
                         result_queue.task_done()
+                        if stream_task.done() and result_queue.empty():
+                            break
                     except asyncio.TimeoutError:
                         # Check if stream is still running
                         if stream_task.done():
