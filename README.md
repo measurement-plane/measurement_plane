@@ -4,15 +4,16 @@
 
 ## Table of Contents
 1. [Features](#features)
-2. [Getting Started](#getting-started)
-3. [Installation](#installation)
-4. [Usage](#usage)
+2. [Message Transformation Flow](#message-transformation-flow)
+3. [Getting Started](#getting-started)
+4. [Installation](#installation)
+5. [Usage](#usage)
    - [Defining Custom Capabilities](#defining-custom-capabilities)
    - [Starting the Agent](#starting-the-agent)
-5. [Configuration](#configuration)
-6. [Project Structure](#project-structure)
-7. [Examples](#examples)
-8. [Contributing](#contributing)
+6. [Configuration](#configuration)
+7. [Project Structure](#project-structure)
+8. [Examples](#examples)
+9. [Contributing](#contributing)
 
 ---
 
@@ -22,6 +23,82 @@
 - **Agent Lifecycle Management**: Manages agents through a lifecycle, from startup to data processing.
 - **Messaging and Task Execution**: Handles messaging seamlessly and allows easy integration of task execution.
 - **Scalable Architecture**: Supports multiple capabilities and allows streaming or single measurements, depending on the task needs.
+
+## Message Transformation Flow
+
+### Starting point: capability message
+
+The capability message is the starting point for every subsequent message. It
+contains all of these fields before any transformation occurs:
+
+| Field | Initial value or source |
+|---|---|
+| `label` | Human-readable capability label (`BaseCapability.label`) |
+| `endpoint` | Endpoint of the agent advertising the capability |
+| `capabilityName` | Capability name (`BaseCapability.name`) |
+| `parameters_schema` | JSON schema used to validate measurement parameters |
+| `resultSchema` | Schema describing the capability's result |
+| `plotSchema` | Schema describing how the result can be plotted |
+| `timestamp` | Capability-message creation time |
+| `nonce` | Normally `null` in a capability advertisement |
+| `metadata` | Capability metadata, including aliases and supported/default execution modes when configured |
+| `capability` | Capability type (`BaseCapability.type`) |
+
+Measurement messages reuse these capability fields and change only the fields
+needed for the next stage. The implemented flow is:
+
+```text
+Capability -> Specification ->+-> Receipt
+                              |
+                              +-> Result(s) -> EOF Result
+```
+
+The receipt and result are both derived directly from the specification. A
+result is **not** derived from the receipt.
+
+| Source -> derived message | Fields removed | Fields added | Fields updated | Fields carried forward unchanged |
+|---|---|---|---|---|
+| Capability -> Specification | `capability` | `specification` = the former `capability` value; `parameters`; `schedule`; `executionMode` | `timestamp` = specification creation time; `nonce` = a new UUID hex value | `label`, `endpoint`, `capabilityName`, `parameters_schema`, `resultSchema`, `plotSchema`, and `metadata` |
+| Specification -> Receipt | `specification` | `receipt` = the former `specification` value | `timestamp` = receipt creation time | Every other specification field, including `parameters`, `schedule`, `nonce`, and `executionMode` |
+| Specification -> Result | `specification` | `result` = the former `specification` value; `measurementId` = the calculated measurement ID; `plane` = `"data"`; `resultValues` = `[results]` | `timestamp` = result creation time | Every other specification field, including `parameters`, `schedule`, `nonce`, and `executionMode` |
+| Specification -> EOF Result | `specification` | The same fields as a normal result, but `resultValues` = `["EOF_results"]` | `timestamp` = EOF result creation time | Every other specification field |
+
+The client supplies the concrete `parameters`, `schedule`, fresh `timestamp`,
+fresh `nonce`, and `executionMode` when it creates the specification.
+
+### Interrupt and lifecycle side messages
+
+Interrupts and lifecycle events branch from the main measurement flow:
+
+| Source -> derived message | Fields removed | Fields added | Fields updated | Fields carried forward unchanged |
+|---|---|---|---|---|
+| Specification -> Interrupt | `specification` | `interrupt` = the former `specification` value | None | Every other specification field |
+| Interrupt -> Interrupt Receipt | None (`interrupt` is retained) | `receipt` = the `interrupt` value; `interruptConfirmed`; `status` | `timestamp` = receipt creation time | Every other interrupt field |
+| Specification -> Lifecycle Event | The event is built as a new message rather than by copying and removing fields | `measurementId`, `endpoint`, `capabilityName`, `timestamp`, `plane` = `"control"`, `lifecycleEvent`, `lifecycleState`, `sequence`, `eventPayload`, and `executionMode` | Not applicable | Only `endpoint`, `capabilityName`, and the resolved `executionMode` are selected from the specification |
+
+For an interrupt receipt, `interruptConfirmed` and `status` depend on agent
+state:
+
+- the operation was the last active operation: `true`, `"interrupted"`;
+- the measurement still has another active operation: `false`,
+  `"measurement_still_running"`;
+- the measurement was already absent: `true`, `"already_stopped"`.
+
+### Message subjects and identifiers
+
+| Message type | NATS subject |
+|---|---|
+| Capability | `capabilities` |
+| Specification or interrupt | `<endpoint>.specifications` |
+| Receipt | The request's temporary reply subject |
+| Result or EOF result | `<measurementId>.results` |
+| Lifecycle event | `<measurementId>.events` |
+
+Identifiers are deterministic except for the operation-specific nonce:
+
+- `capabilityId` is SHA-256 of `endpoint + capabilityName`.
+- `measurementId` is SHA-256 of `capabilityId + parameters + schedule`.
+- `operationId` is SHA-256 of `measurementId + nonce + timestamp`.
 
 ## Getting Started
 
