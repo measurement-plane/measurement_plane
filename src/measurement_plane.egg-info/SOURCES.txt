@@ -17,6 +17,8 @@ src/measurement_plane/messaging/__init__.py
 src/measurement_plane/messaging/message.py
 src/measurement_plane/messaging/message_format.py
 src/measurement_plane/protocols/__init__.py
+src/measurement_plane/protocols/NATS/__init__.py
+src/measurement_plane/protocols/NATS/nats_client.py
 src/measurement_plane/protocols/amqp/__init__.py
 src/measurement_plane/protocols/amqp/receive.py
 src/measurement_plane/protocols/amqp/send.py
