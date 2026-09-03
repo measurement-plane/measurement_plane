@@ -74,7 +74,14 @@ Interrupts and lifecycle events branch from the main measurement flow:
 |---|---|---|---|---|
 | Specification -> Interrupt | `specification` | `interrupt` = the former `specification` value | None | Every other specification field |
 | Interrupt -> Interrupt Receipt | None (`interrupt` is retained) | `receipt` = the `interrupt` value; `interruptConfirmed`; `status` | `timestamp` = receipt creation time | Every other interrupt field |
-| Specification -> Lifecycle Event | The event is built as a new message rather than by copying and removing fields | `measurementId`, `endpoint`, `capabilityName`, `timestamp`, `plane` = `"control"`, `lifecycleEvent`, `lifecycleState`, `sequence`, `eventPayload`, and `executionMode` | Not applicable | Only `endpoint`, `capabilityName`, and the resolved `executionMode` are selected from the specification |
+| Specification -> Measurement Status Event | The event is built as a new message rather than by copying and removing fields | `messageType` = `"measurement_status"`, `measurementId`, `endpoint`, `capabilityName`, `timestamp`, `plane` = `"control"`, `lifecycleEvent`, `lifecycleState`, `status`, `statusMessage`, `source`, `sequence`, `eventPayload`, and `executionMode`; failed events also add `error` and `errorType` | Not applicable | Only `endpoint`, `capabilityName`, and the resolved `executionMode` are selected from the specification |
+
+Measurement status events are separate from receipts. A receipt only confirms
+that the specification reached an agent. Status events report what happened
+afterward: `accepted`, `running`, `retrying`, `completed`, `interrupted`, or
+`failed`. The `source` object identifies the capability endpoint and capability
+name. On failure, `error`, `errorType`, and `statusMessage` provide a
+machine-readable and human-readable reason suitable for clients and GUIs.
 
 For an interrupt receipt, `interruptConfirmed` and `status` depend on agent
 state:
@@ -92,7 +99,7 @@ state:
 | Specification or interrupt | `<endpoint>.specifications` |
 | Receipt | The request's temporary reply subject |
 | Result or EOF result | `<measurementId>.results` |
-| Lifecycle event | `<measurementId>.events` |
+| Measurement status event | `<measurementId>.events` |
 
 Identifiers are deterministic except for the operation-specific nonce:
 

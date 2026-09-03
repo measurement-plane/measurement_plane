@@ -47,6 +47,14 @@ class MessageFields:
     EVENT_PAYLOAD = 'eventPayload'
     SEQUENCE = 'sequence'
     ERROR = 'error'
+    ERROR_TYPE = 'errorType'
+    MESSAGE_TYPE = 'messageType'
+    STATUS_MESSAGE = 'statusMessage'
+    SOURCE = 'source'
+
+
+class MessageTypes:
+    MEASUREMENT_STATUS = 'measurement_status'
 
 
 class ExecutionModes:
@@ -67,6 +75,10 @@ class LifecycleStates:
 class CapabilityMetadata:
     DEFAULT_EXECUTION_MODE = 'defaultExecutionMode'
     SUPPORTED_EXECUTION_MODES = 'supportedExecutionModes'
+    PROVIDER_KIND = 'providerKind'
+    RESOURCE_AGENT_TYPE = 'resourceAgentType'
+    RESOURCE_TYPE = 'resourceType'
+    RESOURCE_CHANNELS = 'channels'
 
 from datetime import datetime, timedelta
 import re
@@ -77,6 +89,8 @@ class TaskSchedule:
 
     def parse_schedule(self, schedule: str):
         parts = schedule.split('|')
+        if len(parts) > 3:
+            raise ValueError(f"Invalid schedule format: {schedule}")
         
         # Handle 'now' case
         if parts[0].strip().lower() == 'now':
@@ -89,7 +103,10 @@ class TaskSchedule:
                 raise ValueError(f"Invalid start time format: {parts[0]}")
 
         # Parse stop time if provided
-        if len(parts) >= 2 and parts[1].strip():
+        legacy_stream = len(parts) == 2 and parts[1].strip().lower() == 'stream'
+        if legacy_stream:
+            self.stream = "active"
+        elif len(parts) >= 2 and parts[1].strip():
             try:
                 self.stop = datetime.fromisoformat(parts[1].strip())
             except ValueError:
@@ -101,7 +118,7 @@ class TaskSchedule:
 
         # Parse periodicity if provided
         elif len(parts) == 3 and parts[2].strip():
-            periodicity_match = re.match(r'(\d+(\.\d+)?)([smhd])', parts[2].strip())
+            periodicity_match = re.fullmatch(r'(\d+(\.\d+)?)([smhd])', parts[2].strip())
             if periodicity_match:
                 value, unit = periodicity_match.groups()[0], periodicity_match.groups()[2]  # Explicitly separate value and unit
                 value = float(value)  # Convert value to float to handle both integers and floats

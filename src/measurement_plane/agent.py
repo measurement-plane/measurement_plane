@@ -11,6 +11,7 @@ from measurement_plane.messaging.message_format import (
     TaskSchedule,
     ExecutionModes,
     LifecycleStates,
+    MessageTypes,
 )
 from measurement_plane.protocols.NATS.nats_client import NATSClient
 class Agent:
@@ -222,15 +223,15 @@ class Agent:
                                 except asyncio.CancelledError:
                                     pass
                             break
-                        results = await asyncio.wait_for(result_queue.get(), timeout=3600)
+                        results = await asyncio.wait_for(result_queue.get(), timeout=1)
                         await self.send_result_async(specification_msg, results)
                         result_queue.task_done()
-                        if execution_mode == ExecutionModes.FINITE_STREAM and stream_task.done() and result_queue.empty():
-                            break
-                        if execution_mode == ExecutionModes.INFINITE_STREAM and stream_task.done() and result_queue.empty():
+                        if stream_task.done() and result_queue.empty():
+                            stream_task.result()
                             break
                     except asyncio.TimeoutError:
                         if stream_task.done():
+                            stream_task.result()
                             break
                     except asyncio.CancelledError:
                         raise
@@ -300,6 +301,7 @@ class Agent:
                 payload={
                     MessageFields.STATUS: "failed",
                     MessageFields.ERROR: str(e),
+                    MessageFields.ERROR_TYPE: type(e).__name__,
                 },
             )
             await self.send_result_async(specification_msg, MessageFields.EOF_RESULTS)
@@ -325,12 +327,31 @@ class Agent:
 
     async def send_lifecycle_event(self, specification_msg, measurement_id, event_name, state, payload=None):
         try:
+            payload = payload or {}
             entry = self.running_measurements.get(measurement_id)
             sequence = 1
             if entry is not None:
                 sequence = entry.get("event_sequence", 0) + 1
                 entry["event_sequence"] = sequence
+            status_messages = {
+                LifecycleStates.ACCEPTED: "Measurement accepted by the capability",
+                LifecycleStates.RUNNING: "Measurement is running",
+                LifecycleStates.RETRYING: "Measurement is retrying",
+                LifecycleStates.COMPLETED: "Measurement completed successfully",
+                LifecycleStates.INTERRUPTED: "Measurement was interrupted",
+                LifecycleStates.FAILED: "Measurement failed",
+            }
+            error = payload.get(MessageFields.ERROR)
+            status_message = payload.get(MessageFields.STATUS_MESSAGE) or (
+                f"Measurement failed: {error}" if state == LifecycleStates.FAILED and error
+                else status_messages.get(state, event_name.replace("_", " ").capitalize())
+            )
+            try:
+                execution_mode = self._resolve_execution_mode(specification_msg)
+            except (KeyError, TypeError, ValueError):
+                execution_mode = specification_msg.get(MessageFields.EXECUTION_MODE)
             event_msg = {
+                MessageFields.MESSAGE_TYPE: MessageTypes.MEASUREMENT_STATUS,
                 MessageFields.MEASUREMENT_ID: str(measurement_id),
                 MessageFields.ENDPOINT: specification_msg.get(MessageFields.ENDPOINT),
                 MessageFields.CAPABILITY_NAME: specification_msg.get(MessageFields.CAPABILITY_NAME),
@@ -338,10 +359,20 @@ class Agent:
                 MessageFields.PLANE: MessageFields.CONTROL_PLANE,
                 MessageFields.LIFECYCLE_EVENT: event_name,
                 MessageFields.LIFECYCLE_STATE: state,
+                MessageFields.STATUS: state,
+                MessageFields.STATUS_MESSAGE: status_message,
                 MessageFields.SEQUENCE: sequence,
-                MessageFields.EVENT_PAYLOAD: payload or {},
-                MessageFields.EXECUTION_MODE: self._resolve_execution_mode(specification_msg),
+                MessageFields.EVENT_PAYLOAD: payload,
+                MessageFields.EXECUTION_MODE: execution_mode,
+                MessageFields.SOURCE: {
+                    "kind": "capability",
+                    MessageFields.ENDPOINT: specification_msg.get(MessageFields.ENDPOINT),
+                    MessageFields.CAPABILITY_NAME: specification_msg.get(MessageFields.CAPABILITY_NAME),
+                },
             }
+            if error:
+                event_msg[MessageFields.ERROR] = error
+                event_msg[MessageFields.ERROR_TYPE] = payload.get(MessageFields.ERROR_TYPE, "RuntimeError")
             await self.broker_client.publish(
                 Subjects.get_events_subject(str(measurement_id)),
                 json.dumps(event_msg),

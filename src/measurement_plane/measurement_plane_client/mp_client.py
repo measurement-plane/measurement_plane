@@ -85,14 +85,14 @@ class Measurement:
         self.stop_confirmed = False
         self.last_interrupt_status = None
         self.state = None
+        self.status_message = None
+        self.error = None
         self.lifecycle_events = []
 
     def configure(self, schedule: str, parameters: dict, result_callback, stream_results: bool = False, redirect_to_storage: bool = False, completion_callback = None, lifecycle_callback=None, execution_mode=None) -> bool:
         if self.validate_parameters(parameters):
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-4]
             nonce = uuid.uuid4().hex
-            if stream_results:
-                schedule += "| stream"
             if execution_mode is None:
                 metadata = self.capability.get(MessageFields.METADATA) or {}
                 execution_mode = metadata.get(CapabilityMetadata.DEFAULT_EXECUTION_MODE)
@@ -171,6 +171,8 @@ class Measurement:
             return
 
         self.state = event_msg.get(MessageFields.LIFECYCLE_STATE)
+        self.status_message = event_msg.get(MessageFields.STATUS_MESSAGE)
+        self.error = event_msg.get(MessageFields.ERROR)
         self.lifecycle_events.append(event_msg)
         lifecycle_callback = self.config.get("lifecycle_callback")
         if lifecycle_callback:
